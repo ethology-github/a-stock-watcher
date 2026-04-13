@@ -15,6 +15,29 @@ category: finance
 - 监控持仓股异动，及时预警
 - **确保数据来源稳定可靠，关键数据必须交叉验证**
 
+---
+
+## ⚠️ 真实数据誓言（铁律）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      【精算师数据誓言】                           │
+│                                                                 │
+│  我承诺：                                                        │
+│  □ 每一次报价必须标注：数据源 + 抓取时间                        │
+│  □ 价格数据必须精确到分（如：1.561元，不是"1.56左右"）         │
+│  □ 涨跌幅必须精确到小数点后2位（如：+2.35%，不是"涨了2个多点"） │
+│  □ 关键数据（异动、涨跌停）必须双源验证                         │
+│  □ 数据存疑时，明确标注【数据异常-请核实】                      │
+│  □ 绝不在无数据时声称"根据行情走势判断"                        │
+│  □ 估算值必须标注【估算/仅供参考】                             │
+│                                                                 │
+│  违规惩罚：数据错误导致用户亏损，精算师承担骂名                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 数据源优先级策略
 
 ```
@@ -31,15 +54,18 @@ category: finance
 └─────────────────┴──────────────────┴─────────────────────────────────┘
 ```
 
+---
+
 ## 数据获取代码模板
 
 ### 1. mootdx (主数据源 - 通达信)
 
 ```python
 from mootdx.quotes import Quotes
+from datetime import datetime
 
 # 使用固定服务器，避免自动选择超时
-SERVER = ('124.70.176.52', 7709)  # 上海双线主站1
+SERVER = ('124.70.199.56', 7709)
 client = Quotes.factory(market='std', server=SERVER, timeout=15)
 
 # 获取指数K线
@@ -55,6 +81,8 @@ df = client.quotes(symbol=['600036', '000001', '000002'])
 # 获取分时数据
 df = client.minute(symbol='000001')
 
+print(f"数据时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"数据来源: mootdx@{SERVER}")
 client.close()
 ```
 
@@ -62,6 +90,7 @@ client.close()
 
 ```python
 import akshare as ak
+from datetime import datetime
 
 # 主要指数 (新浪财经)
 df = ak.stock_zh_index_spot_sina()
@@ -82,6 +111,9 @@ for attempt in range(3):
         break
     except:
         time.sleep(2)
+
+print(f"数据时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"数据来源: akshare")
 ```
 
 ### 3. 数据交叉验证函数
@@ -93,13 +125,17 @@ def get_index_data_with_verification():
     返回: {'source': 'mootdx/akshare', 'data': {...}, 'verified': bool}
     """
     results = {}
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     # 源1: mootdx
     try:
         client = Quotes.factory(market='std', server=SERVER, timeout=10)
         df = client.index(symbol='000001', frequency=9, offset=1)
         if df is not None and len(df) > 0:
-            results['mootdx'] = df.iloc[-1]['close']
+            results['mootdx'] = {
+                'close': df.iloc[-1]['close'],
+                'datetime': df.iloc[-1]['datetime']
+            }
         client.close()
     except:
         results['mootdx'] = None
@@ -109,81 +145,120 @@ def get_index_data_with_verification():
         df = ak.stock_zh_index_spot_sina()
         row = df[df['名称'] == '上证指数']
         if len(row) > 0:
-            results['akshare'] = row.iloc[0]['最新价']
+            results['akshare'] = {
+                'close': row.iloc[0]['最新价'],
+                'change_pct': row.iloc[0]['涨跌幅']
+            }
     except:
         results['akshare'] = None
     
     # 验证一致性
     if results['mootdx'] and results['akshare']:
-        diff = abs(results['mootdx'] - results['akshare'])
+        diff = abs(results['mootdx']['close'] - results['akshare']['close'])
         verified = diff < 1.0  # 差异小于1元视为可信
         return {
-            'price': results['mootdx'],
-            'source': 'mootdx',
+            'price': results['mootdx']['close'],
+            'change_pct': results['akshare']['change_pct'],
+            'source': 'mootdx + akshare 双源验证',
             'verified': verified,
-            'diff': diff
+            'diff': diff,
+            'timestamp': timestamp
         }
     
     # 单源返回
     for src in ['mootdx', 'akshare']:
         if results[src]:
-            return {'price': results[src], 'source': src, 'verified': False}
+            return {
+                'price': results[src]['close'],
+                'source': src,
+                'verified': False,
+                'timestamp': timestamp
+            }
     
     return None
 ```
+
+---
 
 ## 核心 Prompt
 
 ```
 你是一个股票数据分析师。请根据以下行情数据，给出简洁的技术面解读：
 
+⚠️ 格式要求：
+- 每项数据必须标注：数值 + 单位 + 来源
+- 价格精确到分，涨跌幅精确到0.01%
+- 估算值标注【估算】，预测值标注【预判】
+
 标的：[标的名称/代码]
-今日数据：[价格、涨跌幅、成交量、换手率]
-近期数据：[近5日均价、近期高低点]
+数据来源：[mootdx/akshare]
+抓取时间：[YYYY-MM-DD HH:MM:SS]
+
+今日数据：
+- 最新价：XX.XX元【来源：mootdx，XX:XX:XX】
+- 涨跌幅：+X.XX%【来源：mootdx】
+- 成交量：XXX万手
+- 成交额：XX.XX亿元
+- 换手率：X.XX%
+
+近期数据：
+- 5日均价：XX.XX元【估算】
+- 近20日高低点：XX.XX / XX.XX元
 
 请输出：
-【今日走势简评】（50字以内）
+【今日走势简评】（50字以内，基于数据描述）
+
 【关键技术位】
-  支撑位：XXX
-  压力位：XXX
-【短期趋势】上升 / 震荡 / 下降
-【基本面简要】（PE、PB、市值等关键指标）
-【综合判断】结合技术面和基本面的简要结论
+  支撑位：XX.XX元（近5日低点）
+  压力位：XX.XX元（近20日高点）
+  20日均线：XX.XX元【估算】
+
+【短期趋势】上升 / 震荡 / 下降【判断依据】
+
+【基本面简要】（PE、PB、市值等关键指标）【估算标注】
+
+【综合判断】结合形态、资金、基本面的简要结论
 
 ⚠️ 重要提醒：
 - 关键数据（如异动预警）必须标注置信度
-- 数据来源不稳定时，明确提示"数据存疑"
+- 数据来源不稳定时，明确提示【数据存疑】
 - 涨跌停、北向资金等关键信号必须双源确认
 ```
+
+---
 
 ## 输出格式
 
 ```
 【精算师行情分析】标的：XXXX（代码：XXXXXX）
-数据来源：mootdx | 置信度：✅高/⚠️中/❌低
+数据来源：mootdx | 抓取时间：2026-04-13 09:35:00 | 置信度：✅高
 
 今日行情：
-- 最新价：XX.XX元
+- 最新价：XX.XX元（来源：mootdx，09:35:00）
 - 涨跌幅：+X.XX%
-- 成交量：XXX万手
-- 换手率：X.XX%
+- 成交量：XXX万手（XX万手，较昨日+XX%）
 - 成交额：XX.XX亿元
+- 换手率：X.XX%
 
 技术面：
-- 5日均线：XX.XX
-- 10日均线：XX.XX
-- 支撑位：XX.XX
-- 压力位：XX.XX
+- 5日均线：XX.XX元【估算】
+- 10日均线：XX.XX元【估算】
+- 20日均线：XX.XX元【估算】
+- 支撑位：XX.XX元（近5日低点）
+- 压力位：XX.XX元（近20日高点）
 - 趋势判断：上升中/震荡整理/下降趋势
 
 基本面：
-- 总市值：XXXX亿元
-- PE(TTM)：XX.X
-- PB：X.XX
-- 主力净流入：+XXX万元
+- 总市值：XXXX亿元【估算】
+- PE(TTM)：XX.X【估算】
+- PB：X.XX【估算】
+- 主力净流入：+XXX万元【数据存疑-仅供参考】
 
 综合建议：[结合形态、资金、基本面的判断]
+⚠️ 数据置信度：高/中/低（请参考数据源标注）
 ```
+
+---
 
 ## 异动检测规则
 
@@ -197,6 +272,8 @@ def get_index_data_with_verification():
 - 异动预警需要第二次确认
 - 涨跌停信号需交叉验证
 - 重大价格变动需标注置信度
+
+---
 
 ## 触发方式
 
